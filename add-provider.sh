@@ -134,6 +134,13 @@ const BUILTIN = {
     keyless: false,
     promptUrl: true,
   },
+  reflection: {
+    displayName: "Reflection AI",
+    baseUrl: "https://api.reflection.ai/openai/v1",
+    keyless: false,
+    keyHint: "platform.reflection.ai → API Keys",
+    compat: { requiresReasoningContentOnAssistantMessages: true },
+  },
 };
 
 // README "Auth" column text for the built-in providers, used only by patchreadme.
@@ -154,6 +161,7 @@ const BUILTIN_AUTH = {
   anthropic: "`sk-ant-...` key from console.anthropic.com/settings/keys (paid); catalog fetched with `x-api-key`",
   jetstream2: "Open WebUI API key: sign in at llm.jetstream-cloud.org with ACCESS → Settings → Account → API keys",
   docker_model_runner: "Optional bearer token; leave blank for a default local install",
+  reflection: "API key from platform.reflection.ai → API Keys",
 };
 
 /**
@@ -335,6 +343,7 @@ if (cmd === "menu") {
   lines.push('    keyless: ' + (tpl.keyless ? "true" : "false") + ",");
   if (tpl.keyHint) lines.push('    keyHint: ' + JSON.stringify(tpl.keyHint) + ",");
   if (tpl.promptUrl) lines.push("    promptUrl: true,");
+  if (tpl.compat) lines.push('    compat: ' + JSON.stringify(tpl.compat) + ",");
   lines.push("  },");
   const block = "\n" + lines.join("\n");
   writeAtomic(indexPath, src.slice(0, anchor) + block + src.slice(anchor), null);
@@ -421,6 +430,7 @@ MODELS_ID_FIELD="$(tpl_field "$TPL_KEY" modelsIdField)"
 MODELS_KEEP_TASK="$(tpl_field "$TPL_KEY" modelsKeepTask)"
 MODEL_FILTER="$(tpl_field "$TPL_KEY" modelFilter)"
 FALLBACK_MODELS="$(tpl_field "$TPL_KEY" fallbackModels)"
+COMPAT="$(tpl_field "$TPL_KEY" compat)"
 
 echo
 echo "Selected: $DISPLAY_NAME"
@@ -554,6 +564,7 @@ PROVIDER_JSON="$(
   DISPLAY_NAME="$DISPLAY_NAME" BASE_URL="$BASE_URL" API_KEY="$API_KEY" \
   MODELS_JSON="$MODELS_JSON" MODELS_URL="$MODELS_URL" \
   MODELS_ID_FIELD="$MODELS_ID_FIELD" MODELS_KEEP_TASK="$MODELS_KEEP_TASK" \
+  COMPAT="$COMPAT" \
   node -e '
 const e = process.env;
 const out = {
@@ -566,6 +577,7 @@ const out = {
 if (e.MODELS_URL) out.modelsUrl = e.MODELS_URL;
 if (e.MODELS_ID_FIELD) out.modelsIdField = e.MODELS_ID_FIELD;
 if (e.MODELS_KEEP_TASK) out.modelsKeepTask = e.MODELS_KEEP_TASK;
+if (e.COMPAT) out.compat = JSON.parse(e.COMPAT);
 process.stdout.write(JSON.stringify(out));'
 )"
 
@@ -588,12 +600,13 @@ if [ "$IN_FILE" != "1" ] && [ "$TPL_KEY" != "custom" ]; then
   read -r -p "Add it to index.ts and the README table too? [y/N]: " yn
   case "${yn:-N}" in
     [Yy]*)
-      TPLJSON="$(DISPLAY_NAME="$DISPLAY_NAME" BASE_URL="$BASE_URL" KEYLESS="$KEYLESS" KEY_HINT="$KEY_HINT" PROMPT_URL="$PROMPT_URL" node -e '
+      TPLJSON="$(DISPLAY_NAME="$DISPLAY_NAME" BASE_URL="$BASE_URL" KEYLESS="$KEYLESS" KEY_HINT="$KEY_HINT" PROMPT_URL="$PROMPT_URL" COMPAT="$COMPAT" node -e '
 const e=process.env;
 process.stdout.write(JSON.stringify({
   displayName: e.DISPLAY_NAME, baseUrl: e.BASE_URL,
   keyless: e.KEYLESS === "true", keyHint: e.KEY_HINT || undefined,
-  promptUrl: e.PROMPT_URL === "true" || undefined }));')"
+  promptUrl: e.PROMPT_URL === "true" || undefined,
+  compat: e.COMPAT ? JSON.parse(e.COMPAT) : undefined }));')"
       echo "  index.ts:  $(node_helper patch-index "$INDEX_TS" "$TPL_KEY" "$TPLJSON")"
       echo "  README.md: $(node_helper patch-readme "$README_MD" "$TPL_KEY" "$DISPLAY_NAME" "$BASE_URL")"
       ;;

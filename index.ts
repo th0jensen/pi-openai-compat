@@ -57,6 +57,8 @@ interface ProviderConfig {
   modelsUrl?: string;
   modelsIdField?: string;
   modelsKeepTask?: string;
+  /** OpenAI compatibility flags applied to every model registered from this provider. */
+  compat?: Record<string, unknown>;
   // Set once we've warned the user that this provider's saved baseUrl no longer
   // matches its template and can't be auto-migrated, so the notice is shown
   // only once rather than on every session_start while the config stays stale.
@@ -75,7 +77,9 @@ type RawModel = {
   id?: string;
   name?: string;
   context_window?: unknown;
+  context_length?: unknown;
   max_tokens?: unknown;
+  max_output_tokens?: unknown;
   reasoning?: unknown;
   input?: unknown;
   task?: { name?: string };
@@ -150,6 +154,8 @@ export const TEMPLATES: Record<string, {
   modelsIdField?: string;
   /** Keep only models whose task.name matches this string (case-insensitive). */
   modelsKeepTask?: string;
+  /** OpenAI compatibility flags applied to every model registered from this template. */
+  compat?: Record<string, unknown>;
 }> = {
   openrouter: {
     displayName: "OpenRouter",
@@ -551,6 +557,13 @@ export const TEMPLATES: Record<string, {
     keyHint: "llm.jetstream-cloud.org → sign in with ACCESS → your name (lower left) → Settings → Account → API keys",
     fallbackModels: ["gpt-oss-120b", "muse-glimmer", "qwen-3.8-27b", "gemma-4-31b-it"],
   },
+  reflection: {
+    displayName: "Reflection AI",
+    baseUrl: "https://api.reflection.ai/openai/v1",
+    keyless: false,
+    keyHint: "platform.reflection.ai → API Keys",
+    compat: { requiresReasoningContentOnAssistantMessages: true },
+  },
   custom: {
     displayName: "Custom Endpoint",
     baseUrl: "",
@@ -880,12 +893,48 @@ export async function fetchModels(
         typeof rawId === "string" ? rawId :
         typeof rawId === "number" ? String(rawId) :
         "";
+      // Some catalogs (e.g. Reflection) report token limits under
+      // context_length / max_output_tokens rather than context_window /
+      // max_tokens, so accept either spelling.
+      const reasoningValue = m.reasoning;
+      const reasoningIsBool = typeof reasoningValue === "boolean";
+      const reasoningObj =
+        reasoningValue && typeof reasoningValue === "object" && !Array.isArray(reasoningValue)
+          ? (reasoningValue as { supported_efforts?: unknown })
+          : null;
+      const supportedEfforts = Array.isArray(reasoningObj?.supported_efforts)
+        ? reasoningObj!.supported_efforts.filter((v): v is string => typeof v === "string")
+        : [];
+      const supported = new Set(supportedEfforts);
+      const thinkingLevelMap =
+        reasoningObj !== null && supportedEfforts.length > 0
+          ? {
+              off: null,
+              minimal: null,
+              low: supported.has("low") ? "low" : null,
+              medium: supported.has("medium") ? "medium" : null,
+              high: supported.has("high") ? "high" : null,
+              xhigh: supported.has("xhigh") ? "xhigh" : null,
+              max: supported.has("max") ? "max" : null,
+            }
+          : undefined;
       return {
         id,
-        contextWindow: normalizeTokenCount(m.context_window, MAX_CONTEXT_WINDOW),
-        maxTokens: normalizeTokenCount(m.max_tokens, MAX_OUTPUT_TOKENS),
-        reasoning: typeof m.reasoning === "boolean" ? m.reasoning : undefined,
+        contextWindow: normalizeTokenCount(
+          m.context_window ?? m.context_length,
+          MAX_CONTEXT_WINDOW,
+        ),
+        maxTokens: normalizeTokenCount(
+          m.max_tokens ?? m.max_output_tokens,
+          MAX_OUTPUT_TOKENS,
+        ),
+        reasoning: reasoningIsBool
+          ? reasoningValue
+          : reasoningObj !== null
+            ? true
+            : undefined,
         input: normalizeInput(m.input),
+        ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
       };
     })
     .filter((m) => Boolean(m.id))
@@ -949,10 +998,21 @@ export function mergeModelMetadata(previous: CachedModel[], fetched: CachedModel
 export const KEYLESS_PLACEHOLDER = "unused";
 
 export function compatKey(key: string): string {
+  // Reflection AI's provider is surfaced under its own name rather than the
+  // generic compat-<key> slug, so the footer/model picker reports
+  // "Reflection AI" instead of "compat-reflection".
+  if (key === "reflection") return "Reflection AI";
   return `compat-${key}`;
 }
 
 export function registerProvider(pi: ExtensionAPI, key: string, p: ProviderConfig): void {
+  const baseModels = buildProviderModels(p.cachedModels);
+  const models = p.compat
+    ? baseModels.map((m) => ({
+        ...m,
+        compat: { ...p.compat, ...(m as { compat?: Record<string, unknown> }).compat },
+      }))
+    : baseModels;
   pi.registerProvider(compatKey(key), {
     name: `compat/${key.replace(/_/g, "-")}`,
     baseUrl: p.baseUrl,
@@ -964,7 +1024,7 @@ export function registerProvider(pi: ExtensionAPI, key: string, p: ProviderConfi
     // this; ones that require a key return a clean 401.
     apiKey: p.apiKey ?? KEYLESS_PLACEHOLDER,
     api: "openai-completions" as const,
-    models: buildProviderModels(p.cachedModels),
+    models,
   });
 }
 
@@ -1302,6 +1362,7 @@ export default async function (pi: ExtensionAPI) {
         modelsUrl,
         modelsIdField: tpl.modelsIdField,
         modelsKeepTask: tpl.modelsKeepTask,
+        ...(tpl.compat ? { compat: tpl.compat } : {}),
       };
       saveConfig(config);
       if (!tryRegisterProvider(pi, key, config.providers[key])) {
